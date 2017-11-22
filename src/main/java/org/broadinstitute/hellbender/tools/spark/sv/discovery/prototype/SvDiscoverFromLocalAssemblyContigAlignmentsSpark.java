@@ -21,8 +21,8 @@ import org.broadinstitute.hellbender.engine.spark.GATKSparkTool;
 import org.broadinstitute.hellbender.exceptions.UserException;
 import org.broadinstitute.hellbender.tools.spark.sv.StructuralVariationDiscoveryArgumentCollection;
 import org.broadinstitute.hellbender.tools.spark.sv.discovery.AlignedContig;
-import org.broadinstitute.hellbender.tools.spark.sv.utils.SVUtils;
 import org.broadinstitute.hellbender.tools.spark.sv.utils.SVFileUtils;
+import org.broadinstitute.hellbender.tools.spark.sv.utils.SVUtils;
 import org.broadinstitute.hellbender.utils.io.IOUtils;
 import org.broadinstitute.hellbender.utils.read.GATKRead;
 
@@ -113,14 +113,16 @@ public final class SvDiscoverFromLocalAssemblyContigAlignmentsSpark extends GATK
                                                                                                 final boolean writeSAMFiles,
                                                                                                 final Logger localLogger) {
         // filter alignments and split the gaps, hence the name "reconstructed"
-        final JavaRDD<AlignedContig> contigsWithAlignmentsReconstructed =
+        final JavaRDD<AlignedContig> contigsWithChimericAlignmentsReconstructed =
                 FilterLongReadAlignmentsSAMSpark
                         .filterByScore(reads, headerBroadcast.getValue(), nonCanonicalChromosomeNamesFile, 0.0, localLogger)
                         .filter(lr -> lr.alignmentIntervals.size() > 1).cache();
+        localLogger.info( contigsWithChimericAlignmentsReconstructed.count() +
+                " contigs with chimeric alignments potentially giving SV signals.");
 
         // classify assembly contigs by their possible type of SV based on studying alignment signature
         final EnumMap<RawTypes, JavaRDD<AssemblyContigWithFineTunedAlignments>> contigsByPossibleRawTypes =
-                AssemblyContigAlignmentSignatureClassifier.classifyContigs(contigsWithAlignmentsReconstructed, broadcastSequenceDictionary, localLogger);
+                AssemblyContigAlignmentSignatureClassifier.classifyContigs(contigsWithChimericAlignmentsReconstructed, broadcastSequenceDictionary, localLogger);
 
         debug(reads, contigsByPossibleRawTypes, headerBroadcast, outputDir, writeSAMFiles, localLogger);
 
@@ -173,7 +175,7 @@ public final class SvDiscoverFromLocalAssemblyContigAlignmentsSpark extends GATK
                                  final String outputDir, final Logger toolLogger) {
 
         final Set<String> filteredReadNames = new HashSet<>( filteredContigs.map(decoratedTig -> decoratedTig.contig).map(tig -> tig.contigName).distinct().collect() );
-        toolLogger.info(filteredReadNames.size() + " long reads indicating " + rawTypeString);
+        toolLogger.info(filteredReadNames.size() + " contigs indicating " + rawTypeString);
         final JavaRDD<SAMRecord> splitLongReads = originalContigs.filter(read -> filteredReadNames.contains(read.getName()))
                 .map(read -> read.convertToSAMRecord(headerBroadcast.getValue()));
         SVFileUtils.writeSAMFile(outputDir+"/"+rawTypeString+".sam", splitLongReads.collect().iterator(), headerBroadcast.getValue(),

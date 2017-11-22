@@ -273,17 +273,17 @@ final class AssemblyContigAlignmentSignatureClassifier {
     /**
      * Process provided {@code originalConfiguration} of an assembly contig and split between good and bad alignments.
      * The returned pair has good alignments as its first (i.e. updated configuration),
-     * and bad ones as its second (could be used for, e.g. annotate mappings of inserted sequence).
+     * and bad ones as its second (could be used for, e.g. annotating mappings of inserted sequence).
      *
      * <p>
      *     What is considered good and bad?
      *     For a particular mapping/alignment, it may offer low uniqueness in two sense:
      *     <ul>
      *         <li>
-     *             low REFERENCE UNIQUENESS: meaning the sequence being mapped to match multiple locations on the reference;
+     *             low REFERENCE UNIQUENESS: meaning the sequence being mapped match multiple locations on the reference;
      *         </li>
      *         <li>
-     *             low READ UNIQUENESS: with only a very short part of the read being uniquely explained by this particular alignment;
+     *             low READ UNIQUENESS: with only a very short part of the read uniquely explained by this particular alignment;
      *         </li>
      *     </ul>
      *     Good alignments offer both high reference uniqueness and read uniqueness, as judged by the requested
@@ -306,8 +306,8 @@ final class AssemblyContigAlignmentSignatureClassifier {
         // two pass, each focusing on removing the alignments of a contig that offers low uniqueness in one sense:
 
         // first pass is for removing alignments with low REFERENCE UNIQUENESS, using low mapping quality as the criterion
-        final List<AlignmentInterval> selectedAlignments = new ArrayList<>(originalConfiguration.size()),
-                lowUniquenessMappings = new ArrayList<>(originalConfiguration.size());
+        final List<AlignmentInterval> selectedAlignments = new ArrayList<>(originalConfiguration.size());
+        final List<AlignmentInterval> lowUniquenessMappings = new ArrayList<>(originalConfiguration.size());
 
         for (final AlignmentInterval alignment : originalConfiguration) {
             if (alignment.mapQual >= mapQThresholdInclusive)
@@ -324,65 +324,92 @@ final class AssemblyContigAlignmentSignatureClassifier {
         //      This gives unique read region it explains.
         //      If this unique read region is "short": shorter than {@code uniqReadLenInclusive}), drop it.
 
-        // each alignment has an entry of a tuple2, one for max overlap front, one for max overlap rear,
-        // max overlap front is a tuple2 registering the index and overlap bases count
-        final List<Tuple2<Tuple2<Integer, Integer>, Tuple2<Integer, Integer>>> maxOverlapMap =
-                getMaxOverlapPairs(selectedAlignments);
+        // each alignment has an entry of a tuple2, one for max overlap maxFront, one for max overlap maxRear,
+        // max overlap maxFront is a tuple2 registering the index and overlap bases count
+        final List<MaxOverlapInfo> maxOverlapMap = getMaxOverlapPairs(selectedAlignments);
+        int k = 0;
+        for(Iterator<AlignmentInterval> iterator = selectedAlignments.iterator(); iterator.hasNext();) {
+            final AlignmentInterval cur = iterator.next();
+            final MaxOverlapInfo maxOverlapFrontAndRear = maxOverlapMap.get(k);
+            final int maxOverlapFront = Math.max(0, maxOverlapFrontAndRear.maxFront._2);
+            final int maxOverlapRear = Math.max(0, maxOverlapFrontAndRear.maxRear._2);
 
-        final List<Integer> idxToRemove = new ArrayList<>(selectedAlignments.size());
-        for (int i = 0; i < selectedAlignments.size(); ++i) {
-            final AlignmentInterval cur = selectedAlignments.get(i);
-            final Tuple2<Tuple2<Integer, Integer>, Tuple2<Integer, Integer>> maxOverlapFrontAndRear = maxOverlapMap.get(i);
-            final int maxOverlapFront = Math.max(0, maxOverlapFrontAndRear._1._2);
-            final int maxOverlapRead = Math.max(0, maxOverlapFrontAndRear._2._2);
-
-            final int uniqReadSpan = cur.endInAssembledContig - cur.startInAssembledContig + 1 - maxOverlapFront - maxOverlapRead;
-            if (uniqReadSpan < uniqReadLenInclusive)
-                idxToRemove.add(i);
-        }
-
-        if ( idxToRemove.isEmpty() )
-            return new Tuple2<>(selectedAlignments, lowUniquenessMappings);
-
-        // removing in reverse order so that iterators are not invalidated if we were to remove from start
-        final ListIterator<Integer> rit = idxToRemove.listIterator(idxToRemove.size());
-        while (rit.hasPrevious()) {
-            selectedAlignments.remove( rit.previous().intValue() );
+            // theoretically this could be negative for an alignment whose maxFront and maxRear sums together bigger than the read span
+            // but earlier configuration scoring would make this impossible because such alignments should be filtered out already
+            // considering that it brings more penalty than value, i.e. read bases explained (even if the MQ is 60),
+            // but even if it is kept, a negative value won't hurt unless a stupid threshold value is passed in
+            final int uniqReadSpan = cur.endInAssembledContig - cur.startInAssembledContig + 1 - maxOverlapFront - maxOverlapRear;
+            if (uniqReadSpan < uniqReadLenInclusive) {
+                lowUniquenessMappings.add(cur);
+                iterator.remove();
+            }
+            ++k;
         }
 
         return new Tuple2<>(selectedAlignments, lowUniquenessMappings);
     }
 
     /**
-     * Each alignment has an entry of a tuple2, one for max overlap front, one for max overlap rear,
-     * max overlap front is a tuple2 registering the index and overlap bases count
+     * Each alignment in a specific configuration has an entry,
+     * pointing to the alignments that comes before and after it,
+     * that overlaps maximally (i.e. no other front or rear alignments have more overlaps)
+     * with the current alignment.
      */
-    private static List<Tuple2<Tuple2<Integer, Integer>, Tuple2<Integer, Integer>>> getMaxOverlapPairs(final List<AlignmentInterval> selectedAlignments) {
+    private static final class MaxOverlapInfo {
+        final Tuple2<Integer, Integer> maxFront; // 1st holds index pointing to another alignment before this, 2nd holds the count of overlapping bases
+        final Tuple2<Integer, Integer> maxRear;  // same intention as above, but for alignments after this
 
-        final List<Tuple2<Tuple2<Integer, Integer>, Tuple2<Integer, Integer>>> maxOverlapMap =
-                new ArrayList<>(Collections.nCopies(selectedAlignments.size(), new Tuple2<>(new Tuple2<>(-1, -1), new Tuple2<>(-1, -1))));
+        MaxOverlapInfo() {
+            maxFront = new Tuple2<>(-1, -1);
+            maxRear = new Tuple2<>(-1 ,-1);
+        }
 
-        for(int i = 0; i < selectedAlignments.size() - 1; ++i) {
-            final AlignmentInterval cur = selectedAlignments.get(i);
-            int maxOverlap = -1;
-            int maxOverlapIdx = -1;
-            for (int j = i + 1; j < selectedAlignments.size(); ++j) {
-                final int overlap = AlignmentInterval.overlapOnContig(cur, selectedAlignments.get(j));
-                if (overlap > 0) {
-                    maxOverlap = Math.max(maxOverlap, overlap);
-                    maxOverlapIdx = j;
+        MaxOverlapInfo(final Tuple2<Integer, Integer> maxFront, final Tuple2<Integer, Integer> maxRear) {
+            this.maxFront = maxFront;
+            this.maxRear = maxRear;
+        }
+    }
+
+    /**
+     * Extract the max overlap information, front and back, for each alignment in {@code configuration}.
+     * The returned list and the input list have the same length.
+     */
+    private static List<MaxOverlapInfo> getMaxOverlapPairs(final List<AlignmentInterval> configuration) {
+
+        final List<MaxOverlapInfo> maxOverlapMap =
+                new ArrayList<>(Collections.nCopies(configuration.size(), new MaxOverlapInfo()));
+
+        // We iterate through all alignments except the last one
+        // For the last alignment, which naturally doesn't have any maxRear,
+        //     the following implementation sets its maxFront during the iteration
+        for(int i = 0; i < configuration.size() - 1; ++i) {
+
+            final AlignmentInterval cur = configuration.get(i);
+            // For the i-th alignment, we only look at alignments after it (note j starts from i+1) and find max overlap
+            int maxOverlapRearBases = -1;
+            int maxOverlapRearIndex = -1;
+            for (int j = i + 1; j < configuration.size(); ++j) { // note j > i
+                final int overlap = AlignmentInterval.overlapOnContig(cur, configuration.get(j));
+                if (overlap > maxOverlapRearBases) {
+                    maxOverlapRearBases = overlap;
+                    maxOverlapRearIndex = j;
                 } else { // following ones, as guaranteed by the ordering of alignments in the contig, cannot overlap
                     break;
                 }
             }
-            if (maxOverlap > 0){
-                // first set the max_overlap_rear of the current alignment
-                Tuple2<Tuple2<Integer, Integer>, Tuple2<Integer, Integer>> oldValue = maxOverlapMap.get(i);
-                maxOverlapMap.set(i, new Tuple2<>(oldValue._1, new Tuple2<>(maxOverlapIdx, maxOverlap))); // maxOverlapIdx cannot be -1 here
-                // then conditionally set the max_overlap_front of the maxOverlapIdx-th alignment that maximally overlaps with the current alignment
-                oldValue = maxOverlapMap.get(maxOverlapIdx);
-                if (oldValue._1._2 < maxOverlap)
-                    maxOverlapMap.set(maxOverlapIdx, new Tuple2<>(new Tuple2<>(i, maxOverlap), oldValue._2));
+
+            if (maxOverlapRearBases > 0){
+                // for current alignment (i-th), set its max_overlap_rear, which would not change in later iterations and copy old max_overlap_front
+                final Tuple2<Integer, Integer> maxRear = new Tuple2<>(maxOverlapRearIndex, maxOverlapRearBases);
+                final Tuple2<Integer, Integer> maxFrontToCopy = maxOverlapMap.get(i).maxFront;
+                maxOverlapMap.set(i, new MaxOverlapInfo(maxFrontToCopy, maxRear));
+
+                // then conditionally set the max_overlap_front of the
+                // maxOverlapRearIndex-th alignment
+                // that maximally overlaps with the current, i.e. i-th, alignment
+                final MaxOverlapInfo oldValue = maxOverlapMap.get(maxOverlapRearIndex);// maxOverlapRearIndex cannot be -1 here
+                if (oldValue.maxFront._2 < maxOverlapRearBases)
+                    maxOverlapMap.set(maxOverlapRearIndex, new MaxOverlapInfo(new Tuple2<>(i, maxOverlapRearBases), oldValue.maxRear));
             }
         }
         return maxOverlapMap;
